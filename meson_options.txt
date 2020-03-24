@@ -19,5 +19,5 @@ option(
 option(
   'tock_local',
   type: 'boolean',
-  value: false,
+  value: true,
 )
