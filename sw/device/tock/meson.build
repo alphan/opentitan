@@ -60,8 +60,6 @@ tock_bin = custom_target(
   'tock_bin',
   command: [
     prog_objcopy,
-    # Remove .apps section to dramatically reduce binary size.
-    '--remove-section', '.apps',
     '-O', 'binary',
     '@INPUT@',
     '@OUTPUT@'
