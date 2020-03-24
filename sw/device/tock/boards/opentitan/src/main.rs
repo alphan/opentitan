@@ -6,17 +6,17 @@
 #![no_main]
 #![feature(asm)]
 
-use capsules::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
+use capsules::virtual_alarm::VirtualMuxAlarm;
 use kernel::capabilities;
 use kernel::common::dynamic_deferred_call::{DynamicDeferredCall, DynamicDeferredCallClientState};
 use kernel::component::Component;
 use kernel::hil;
 use kernel::Platform;
-use kernel::{create_capability, debug, static_init};
+use kernel::{create_capability, static_init};
 use rv32i::csr;
+use latency::Latency;
 
-mod counter_demo;
-
+mod latency;
 pub mod io;
 //
 // Actual memory for holding the active process structures. Need an empty list
@@ -31,7 +31,7 @@ const FAULT_RESPONSE: kernel::procs::FaultResponse = kernel::procs::FaultRespons
 
 // RAM to be shared by all application processes.
 #[link_section = ".app_memory"]
-static mut APP_MEMORY: [u8; 8192] = [0; 8192];
+static mut APP_MEMORY: [u8; 0x8000] = [0; 0x8000];
 
 // Force the emission of the `.apps` segment in the kernel elf image
 // NOTE: This will cause the kernel to overwrite any existing apps when flashed!
@@ -44,51 +44,6 @@ static APP_HACK: u8 = 0;
 #[link_section = ".stack_buffer"]
 pub static mut STACK_MEMORY: [u8; 0x1000] = [0; 0x1000];
 
-static OT_SPLASH: &[&str] = &[
-
-    "#######################################",
-    "#######################################",
-    "#                                     #",
-    "# /////**///                  /**     #",
-    "#     /**      ******   ***** /**  ** #",
-    "#     /**     **////** **///**/** **  #",
-    "#     /**    /**   /**/**  // /****   #",
-    "#     /**    /**   /**/**   **/**/**  #",
-    "#     /**    //****** //***** /**//** #",
-    "#     //      //////   /////  //  //  #",
-    "#                                     #",
-    "#                                     #",
-    "#            ******  *******          #",
-    "#           **////**//**///**         #",
-    "#          /**   /** /**  /**         #",
-    "#          /**   /** /**  /**         #",
-    "##        //******  ***  /**         ##",
-    "#####      //////  ///   //       #####",
-    "#######                         #######",
-    "#######################################",
-    "############`````#####`````############",
-    "###########``````#####``````###########",
-    "###########``````#####``````###########",
-    "######````````````###````````````######",
-    "######````````````###````````````######",
-    "######````````````###````````````######",
-    "#```````````###############```````````#",
-    "#```````````##```````````##```````````#",
-    "#```````````##```````````##```````````#",
-    "##############```````````##############",
-    "##############```````````##############",
-    "#```````````##```````````##```````````#",
-    "#```````````##```````````##```````````#",
-    "#```````````###############```````````#",
-    "######````````````###````````````######",
-    "######````````````###````````````######",
-    "######````````````###````````````######",
-    "###########``````#####``````###########",
-    "###########``````#####``````###########",
-    "############`````#####`````############",
-    "#######################################",
-];
-
 /// A structure representing this platform that holds references to all
 /// capsules for this platform. We've included an alarm and console.
 struct OpenTitan {
@@ -97,6 +52,7 @@ struct OpenTitan {
         'static,
         VirtualMuxAlarm<'static, ibex::timer::RvTimer<'static>>,
     >,
+    latency: &'static Latency,
 }
 
 /// Mapping of integer syscalls to objects that implement syscalls.
@@ -108,6 +64,7 @@ impl Platform for OpenTitan {
         match driver_num {
             capsules::console::DRIVER_NUM => f(Some(self.console)),
             capsules::alarm::DRIVER_NUM => f(Some(self.alarm)),
+            latency::DRIVER_NUM => f(Some(self.latency)),
             _ => f(None),
         }
     }
@@ -126,8 +83,6 @@ pub unsafe fn reset_handler() {
 
     // initialize capabilities
     let process_mgmt_cap = create_capability!(capabilities::ProcessManagementCapability);
-    let memory_allocation_cap = create_capability!(capabilities::MemoryAllocationCapability);
-
     let main_loop_cap = create_capability!(capabilities::MainLoopCapability);
 
     let board_kernel = static_init!(kernel::Kernel, kernel::Kernel::new(&PROCESSES));
@@ -151,65 +106,54 @@ pub unsafe fn reset_handler() {
         .modify(csr::mie::mie::msoft::SET + csr::mie::mie::mtimer::SET + csr::mie::mie::mext::SET);
     csr::CSR.mstatus.modify(csr::mstatus::mstatus::mie::SET);
 
+    /*
+     * GPIO
+     */
+    let pins = &[7, 8, 9, 10, 11, 12, 13, 14];
+    for pin in pins {
+        hil::gpio::Pin::make_output(&ibex::gpio::PORT[*pin]);
+    }
+
+
+    /*
+     * UART and console
+     */
+
     // Create a shared UART channel for the console and for kernel debug.
     let uart_mux = components::console::UartMuxComponent::new(
         &ibex::uart::UART0,
-        230400,
+        //230400, // for FPGA
+        9600, // for Verilator
         dynamic_deferred_caller,
     )
     .finalize(());
-
-    let alarm = &ibex::timer::TIMER;
-    alarm.setup();
-
-    // Create a shared virtualization mux layer on top of a single hardware
-    // alarm.
-    let mux_alarm = static_init!(
-        MuxAlarm<'static, ibex::timer::RvTimer>,
-        MuxAlarm::new(alarm)
-    );
-    hil::time::Alarm::set_client(&ibex::timer::TIMER, mux_alarm);
-
-    // Alarm
-    let virtual_alarm_user = static_init!(
-        VirtualMuxAlarm<'static, ibex::timer::RvTimer>,
-        VirtualMuxAlarm::new(mux_alarm)
-    );
-    let alarm = static_init!(
-        capsules::alarm::AlarmDriver<'static, VirtualMuxAlarm<'static, ibex::timer::RvTimer>>,
-        capsules::alarm::AlarmDriver::new(
-            virtual_alarm_user,
-            board_kernel.create_grant(&memory_allocation_cap)
-        )
-    );
-    hil::time::Alarm::set_client(virtual_alarm_user, alarm);
 
     // Setup the console.
     let console = components::console::ConsoleComponent::new(board_kernel, uart_mux).finalize(());
     // Create the debugger object that handles calls to `debug!()`.
     components::debug_writer::DebugWriterComponent::new(uart_mux).finalize(());
 
-    let counter_demo_mux = static_init!(
-        capsules::virtual_alarm::VirtualMuxAlarm<'static, ibex::timer::RvTimer>,
-        capsules::virtual_alarm::VirtualMuxAlarm::new(mux_alarm)
-    );
+    /*
+     * Timer and alarm
+     */
 
-    let pins = &[7, 8, 9, 10, 11, 12, 13, 14];
-    for pin in pins {
-        hil::gpio::Pin::make_output(&ibex::gpio::PORT[*pin]);
-    }
+    // Initialize timer hardware.
+    &ibex::timer::TIMER.setup();
 
-    let counter_demo_inst = static_init!(
-        counter_demo::CounterAlarm<'static, capsules::virtual_alarm::VirtualMuxAlarm<ibex::timer::RvTimer>>,
-        counter_demo::CounterAlarm::new(counter_demo_mux, pins)
-    );
-    counter_demo_inst.add_splash_text(OT_SPLASH);
+    // Create a multiplexed interface to the timer hardware.
+    let alarm_mux = components::alarm::AlarmMuxComponent::new(
+        &ibex::timer::TIMER
+    ).finalize(components::alarm_mux_component_helper!(ibex::timer::RvTimer));
 
-    hil::time::Alarm::set_client(counter_demo_mux, counter_demo_inst);
+    // Create an alarm syscall interface (creates a virtual alarm that internally
+    // uses alarm_mux defined above).
+    let alarm_driver = components::alarm::AlarmDriverComponent::new(
+        board_kernel,
+        alarm_mux
+    ).finalize(components::alarm_component_helper!(ibex::timer::RvTimer));
 
-    counter_demo_inst.run(500);
-
-    debug!("OpenTitan initialisation complete. Entering main loop");
+    // Initialize the Latency capsule
+    let latency = static_init!(Latency, Latency::new());
 
     extern "C" {
         /// Beginning of the ROM region containing app images.
@@ -220,7 +164,8 @@ pub unsafe fn reset_handler() {
 
     let opentitan = OpenTitan {
         console: console,
-        alarm: alarm,
+        alarm: alarm_driver,
+        latency: latency,
     };
 
     kernel::procs::load_processes(
