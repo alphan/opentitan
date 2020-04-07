@@ -110,6 +110,16 @@ if [[ ! -z "${ARG_tock_dir}" ]]; then
   fi
 
   if [[ ! -f "${TOCK_SYMLINK}" || -L "${TOCK_SYMLINK}" ]]; then
+
+    # Prepend the required number of "../"s for relative paths
+    if [[ ! "$ARG_tock_dir" = /* ]]; then
+      TOCK_SYMLINK_PATH=`dirname ${TOCK_SYMLINK}`
+      while [[ "${TOCK_SYMLINK_PATH}" != "${REPO_TOP}" ]]; do
+        TOCK_SYMLINK_PATH=`dirname ${TOCK_SYMLINK_PATH}`
+        ARG_tock_dir="../${ARG_tock_dir}";
+      done
+    fi
+
     echo "Creating symlink to Tock project at ${ARG_tock_dir}."
     ln -sf "${ARG_tock_dir}" "${TOCK_SYMLINK}"
   elif [[ -d "${TOCK_SYMLINK}" ]]; then
