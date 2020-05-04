@@ -237,6 +237,7 @@ SECTIONS
            kernel and apps into a single image */
         KEEP (*(.app.*))
     } > prog
+    _eapps = _sapps + LENGTH(prog);
 
 
 
